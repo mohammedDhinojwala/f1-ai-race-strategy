@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
-from src.api.simulator_service import run_simulation
+from simulator_service import run_simulation
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="F1 Strategy API")
