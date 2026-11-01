@@ -2,8 +2,14 @@
 import { useState } from "react";
 import DriverSelection from "../component/DriverSelection";
 import StrategySelection from "../component/StrategySelection";
+import { useRouter } from "next/navigation";
+
+
+
 
 export default function ReplayPage() {
+
+  const router = useRouter();
   const [currentStep, setCurrentStep] = useState(1);
   const [arisOn, setArisOn] = useState(true);
   const [selectedSeason, setSelectedSeason] = useState(2026);
@@ -22,6 +28,8 @@ export default function ReplayPage() {
     { code: "IT", round: "R15", name: "Monza", date: "6 Sep" },
     { code: "SG", round: "R18", name: "Marina Bay", date: "20 Sep" },
   ];
+
+
 
   return (
     <div className="min-h-screen flex flex-col relative pt-8 pb-16">
@@ -104,13 +112,13 @@ export default function ReplayPage() {
         )}
 
         {/* --- STEP 3: STRATEGY SELECTION --- */}
-        {currentStep === 3 && (
+         {currentStep === 3 && (
           <StrategySelection 
             driverName={selectedDriver}
             onBack={() => setCurrentStep(2)} 
-            onStart={() => {
-              // This will eventually route to the dashboard
-              alert(`Starting Race for ${selectedDriver}!`);
+            onStart={(selectedStrategy) => {
+              // Route to dashboard with data in URL
+              router.push(`/race?driver=${selectedDriver}&strategy=${selectedStrategy}`);
             }} 
           />
         )}

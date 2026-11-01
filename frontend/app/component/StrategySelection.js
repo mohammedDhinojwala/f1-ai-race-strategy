@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 // Helper to draw the little tyre circles
 const TyreIcon = ({ type }) => {
@@ -116,9 +117,9 @@ export default function StrategySelection({ onBack, onStart, driverName }) {
       </div>
 
       {/* Action Button */}
-      <div className="flex justify-end">
+     <div className="flex justify-end">
         <button 
-          onClick={onStart}
+          onClick={() => onStart(selectedStrategy)} // <-- Pass the strategy here
           className={`text-xs font-bold tracking-widest py-4 px-10 rounded-md transition-colors uppercase ${
             selectedStrategy 
               ? "bg-[#111] border border-gray-600 text-white hover:bg-gray-800 cursor-pointer" 
