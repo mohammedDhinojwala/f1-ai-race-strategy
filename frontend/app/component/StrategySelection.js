@@ -1,6 +1,5 @@
 "use client";
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 
 // Helper to draw the little tyre circles
 const TyreIcon = ({ type }) => {
