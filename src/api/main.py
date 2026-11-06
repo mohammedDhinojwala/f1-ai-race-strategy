@@ -1,10 +1,11 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+import fastf1
+import pandas as pd
 from typing import List
 from simulator_service import run_simulation, DeepSeek_df
 from fastapi.middleware.cors import CORSMiddleware
-import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = FastAPI(title="F1 Strategy API")
 
@@ -16,6 +17,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ==========================================
+# SIMULATION ENDPOINT
+# ==========================================
 class SimulationRequest(BaseModel):
     race_name: str
     driver: str
@@ -37,20 +41,71 @@ def simulate_strategy(request: SimulationRequest):
 @app.get("/")
 def health_check():
     return {"status": "F1 Backend API is Live!"}
+
 # ==========================================
-# REAL F1 DATA ENDPOINTS
+# DATA ENDPOINTS (Powered by FastF1)
 # ==========================================
 
 @app.get("/api/races")
 def get_races():
-    """Returns the actual last 3 completed races from the calendar."""
-    # Hardcoded real schedule for late 2024 season
-    recent_races = [
-        {"id": 1, "code": "US", "name": "United States Grand Prix", "date": "20 Oct"},
-        {"id": 2, "code": "MX", "name": "Mexico City Grand Prix", "date": "27 Oct"},
-        {"id": 3, "code": "BR", "name": "São Paulo Grand Prix", "date": "03 Nov"}
-    ]
-    return {"races": recent_races}
+    """Fetches the 3 most recent races directly from the FastF1 official schedule."""
+    try:
+        # Enable cache for FastF1 to prevent downloading the schedule every time
+        fastf1.Cache.enable_cache('../../notebooks/f1_cache') 
+        
+        # Get the real 2024 schedule
+        schedule = fastf1.get_event_schedule(2024, include_testing=False)
+        
+        # For the demo, we just grab the last 3 races of the season
+        recent_races = schedule.tail(3).iloc[::-1] 
+        
+        formatted_races = []
+        for _, race in recent_races.iterrows():
+            formatted_races.append({
+                "id": int(race['RoundNumber']),
+                "code": race['Country'][:2].upper(),
+                "name": race['EventName'],
+                "date": race['EventDate'].strftime('%d %b'),
+                "round": f"R{int(race['RoundNumber'])}"
+            })
+            
+        return {"races": formatted_races}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/next-race")
+def get_next_race():
+    """Finds the next upcoming race using FastF1's official schedule."""
+    try:
+        schedule = fastf1.get_event_schedule(2024, include_testing=False)
+        now = pd.Timestamp.now()
+        
+        # Find races that are in the future
+        future_races = schedule[schedule['EventDate'] > now]
+        
+        # If we are testing and all 2024 races are in the past, 
+        # we mock a future date so the UI timer actually works.
+        if future_races.empty:
+            # Grab the last race of the season just for the name
+            next_race = schedule.iloc[-1]
+            # Create a guaranteed future date (2 days, 14 hours, 30 mins from NOW)
+            future_date = datetime.now() + timedelta(days=2, hours=14, minutes=30)
+            
+            return {
+                "name": next_race['EventName'],
+                "circuit": next_race['Location'],
+                "target_date": future_date.isoformat()
+            }
+            
+        # If there is a real future race, use it
+        next_race = future_races.iloc[0]
+        return {
+            "name": next_race['EventName'],
+            "circuit": next_race['Location'],
+            "target_date": next_race['EventDate'].isoformat()
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/api/drivers")
 def get_drivers():
@@ -78,115 +133,3 @@ def get_drivers():
         {"code": "MAG", "name": "Kevin Magnussen", "team": "Haas"}
     ]
     return {"drivers": drivers}
-
-@app.get("/api/next-race")
-def get_next_race():
-    """Returns the next race and the EXACT target date for the countdown."""
-    return {
-        "name": "Las Vegas Grand Prix",
-        "circuit": "Las Vegas Strip Circuit",
-        # We send a real timestamp to the frontend to calculate the exact time left
-        "target_date": "2024-11-23T20:00:00" 
-    }
-
-
-# ==========================================
-# LIVE API DATA ENDPOINTS
-# ==========================================
-
-
-@app.get("/api/races")
-def get_races():
-    """Returns the 3 most recently COMPLETED races from the 2024 season."""
-    try:
-        response = requests.get("https://api.jolpi.ca/ergast/f1/2024.json")
-        data = response.json()
-        all_races = data['MRData']['RaceTable']['Races']
-        
-        now = datetime.now()
-        completed_races = []
-        
-        for race in all_races:
-            # Combine date and time to compare with 'now'
-            race_time_str = race.get('time', '00:00:00Z').replace('Z', '')
-            race_datetime = datetime.strptime(f"{race['date']}T{race_time_str}", "%Y-%m-%dT%H:%M:%S")
-            
-            if race_datetime < now:
-                completed_races.append(race)
-        
-        # Get the last 3 completed races
-        recent_races = completed_races[-3:]
-        
-        formatted_races = []
-        for race in recent_races:
-            formatted_races.append({
-                "id": race['round'],
-                "code": race['Circuit']['circuitId'][:2].upper(),
-                "name": race['raceName'],
-                "date": datetime.strptime(race['date'], '%Y-%m-%d').strftime('%d %b'),
-                "round": f"R{race['round']}"
-            })
-            
-        # Reverse so the most recent is at the top
-        formatted_races.reverse()
-        return {"races": formatted_races}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/api/drivers")
-def get_drivers():
-    try:
-        # Fetch standings to get team/constructor info
-        response = requests.get("https://api.jolpi.ca/ergast/f1/2024/driverstandings.json")
-        data = response.json()
-        standings = data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
-        
-        formatted_drivers = []
-        for entry in standings:
-            driver = entry['Driver']
-            team = entry['Constructors'][0]['name'] if entry['Constructors'] else "Unknown"
-            
-            formatted_drivers.append({
-                "code": driver['code'],
-                "name": f"{driver['givenName']} {driver['familyName']}",
-                "team": team
-            })
-            
-        return {"drivers": formatted_drivers}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/api/next-race")
-def get_next_race():
-    """Returns the NEXT upcoming race from the 2024 season."""
-    try:
-        response = requests.get("https://api.jolpi.ca/ergast/f1/2024.json")
-        data = response.json()
-        all_races = data['MRData']['RaceTable']['Races']
-        
-        now = datetime.now()
-        next_race = None
-        
-        for race in all_races:
-            race_time_str = race.get('time', '00:00:00Z').replace('Z', '')
-            race_datetime = datetime.strptime(f"{race['date']}T{race_time_str}", "%Y-%m-%dT%H:%M:%S")
-            
-            if race_datetime > now:
-                next_race = race
-                break # Stop at the first upcoming race
-        
-        if not next_race:
-            return {"error": "Season finished"}
-            
-        # Format the target date correctly for the timer
-        race_time = next_race.get('time', '00:00:00Z').replace('Z', '')
-        target_datetime = f"{next_race['date']}T{race_time}"
-        
-        return {
-            "name": next_race['raceName'],
-            "circuit": next_race['Circuit']['circuitName'],
-            "target_date": target_datetime
-        }
-    except Exception as e:
-        return {"error": str(e)}
