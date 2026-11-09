@@ -1,25 +1,145 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-import fastf1
-import pandas as pd
+
+from pathlib import Path
 from typing import List
-from simulator_service import run_simulation, DeepSeek_df
+
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime, timedelta
 
-app = FastAPI(title="F1 Strategy API")
+from simulator_service import run_simulation
 
-# Allow your future frontend to talk to this backend
+
+# ==========================================
+# APP SETUP
+# ==========================================
+
+app = FastAPI(title="ARIS - F1 Strategy API")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Development only
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ==========================================
+# CALENDAR DATA
+# ==========================================
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+CALENDAR_PATH = BASE_DIR / "notebooks" / "season_calendar.csv"
+
+# Check if calendar file exists
+if not CALENDAR_PATH.exists():
+    raise FileNotFoundError(
+        f"Calendar file not found: {CALENDAR_PATH}"
+    )
+
+# Load calendar
+CALENDAR = pd.read_csv(CALENDAR_PATH)
+
+# Validate required columns
+required_columns = [
+    "Year",
+    "RoundNumber",
+    "EventName",
+    "Country",
+    "Location",
+    "Session",
+    "SessionDateUTC",
+]
+
+missing_columns = [
+    col for col in required_columns
+    if col not in CALENDAR.columns
+]
+
+if missing_columns:
+    raise ValueError(
+        f"Missing calendar columns: {missing_columns}"
+    )
+
+# Convert session dates to UTC
+CALENDAR["SessionDateUTC"] = pd.to_datetime(
+    CALENDAR["SessionDateUTC"],
+    utc=True,
+    errors="coerce"
+)
+
+# Remove rows with invalid session dates
+CALENDAR = CALENDAR.dropna(
+    subset=["SessionDateUTC"]
+).copy()
+
+# Clean session names
+CALENDAR["Session"] = (
+    CALENDAR["Session"].astype(str).str.strip()
+)
+
+# Sort calendar chronologically
+CALENDAR = CALENDAR.sort_values(
+    "SessionDateUTC"
+).reset_index(drop=True)
+
+print("F1 Calendar loaded successfully!")
+print("File:", CALENDAR_PATH)
+print("Total sessions:", len(CALENDAR))
+print("Seasons:", sorted(CALENDAR["Year"].unique()))
+
+
+def country_code(country):
+    codes = {
+        "Brazil": "BR",
+        "Mexico": "MX",
+        "United States": "US",
+        "USA": "US",
+        "United Kingdom": "UK",
+        "Italy": "IT",
+        "Japan": "JP",
+        "Australia": "AU",
+        "China": "CN",
+        "Bahrain": "BH",
+        "Saudi Arabia": "SA",
+        "Monaco": "MC",
+        "Spain": "ES",
+        "Canada": "CA",
+        "Austria": "AT",
+        "Hungary": "HU",
+        "Belgium": "BE",
+        "Netherlands": "NL",
+        "Singapore": "SG",
+        "Qatar": "QA",
+        "Azerbaijan": "AZ",
+        "United Arab Emirates": "AE",
+    }
+
+    return codes.get(str(country), str(country)[:2].upper())
+
+
+def session_is(series, expected):
+    return series.astype(str).str.strip().str.casefold().isin(
+        [value.casefold() for value in expected]
+    )
+
+
+# ==========================================
+# HEALTH CHECK
+# ==========================================
+
+@app.get("/")
+def health_check():
+    return {
+        "status": "ARIS Backend API is Live!",
+        "calendar_rows": len(CALENDAR)
+    }
+
+
+# ==========================================
 # SIMULATION ENDPOINT
 # ==========================================
+
 class SimulationRequest(BaseModel):
     race_name: str
     driver: str
@@ -27,109 +147,146 @@ class SimulationRequest(BaseModel):
     my_pits: List[int]
     rival_pits: List[int]
 
+
 @app.post("/api/simulate")
 def simulate_strategy(request: SimulationRequest):
-    result = run_simulation(
-        race_name=request.race_name,
-        driver=request.driver,
-        rival=request.rival,
-        my_pits=request.my_pits,
-        rival_pits=request.rival_pits
-    )
-    return result
+    try:
+        return run_simulation(
+            race_name=request.race_name,
+            driver=request.driver,
+            rival=request.rival,
+            my_pits=request.my_pits,
+            rival_pits=request.rival_pits
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/")
-def health_check():
-    return {"status": "F1 Backend API is Live!"}
 
 # ==========================================
-# DATA ENDPOINTS (Powered by FastF1)
+# CALENDAR ENDPOINT
+# ==========================================
+
+@app.get("/api/calendar")
+def get_calendar():
+    data = CALENDAR.copy()
+
+    data["SessionDateUTC"] = (
+        data["SessionDateUTC"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+
+    data = data.astype(object).where(pd.notna(data), None)
+
+    return {
+        "calendar": data.to_dict(orient="records")
+    }
+
+
+# ==========================================
+# NEXT RACE / NEXT FP1
+# ==========================================
+
+@app.get("/api/next-race")
+def get_next_race():
+
+    now = pd.Timestamp.now(tz="UTC")
+
+    fp1_rows = CALENDAR[
+        session_is(
+            CALENDAR["Session"],
+            ["Practice 1", "FP1"]
+        )
+        & (CALENDAR["SessionDateUTC"] > now)
+    ].sort_values("SessionDateUTC")
+
+    if fp1_rows.empty:
+        return {
+            "available": False,
+            "message": "No upcoming FP1 session found."
+        }
+
+    race = fp1_rows.iloc[0]
+
+    return {
+        "available": True,
+        "name": race["EventName"],
+        "circuit": race["Location"],
+        "country": race["Country"],
+        "session": "FP1",
+        "target_date": race["SessionDateUTC"].isoformat()
+    }
+
+
+# ==========================================
+# LAST 3 COMPLETED RACES
 # ==========================================
 
 @app.get("/api/races")
 def get_races():
-    """Fetches the 3 most recent races directly from the FastF1 official schedule."""
-    try:
-        # Enable cache for FastF1 to prevent downloading the schedule every time
-        fastf1.Cache.enable_cache('../../notebooks/f1_cache') 
-        
-        # Get the real 2024 schedule
-        schedule = fastf1.get_event_schedule(2024, include_testing=False)
-        
-        # For the demo, we just grab the last 3 races of the season
-        recent_races = schedule.tail(3).iloc[::-1] 
-        
-        formatted_races = []
-        for _, race in recent_races.iterrows():
-            formatted_races.append({
-                "id": int(race['RoundNumber']),
-                "code": race['Country'][:2].upper(),
-                "name": race['EventName'],
-                "date": race['EventDate'].strftime('%d %b'),
-                "round": f"R{int(race['RoundNumber'])}"
-            })
-            
-        return {"races": formatted_races}
-    except Exception as e:
-        return {"error": str(e)}
 
-@app.get("/api/next-race")
-def get_next_race():
-    """Finds the next upcoming race using FastF1's official schedule."""
-    try:
-        schedule = fastf1.get_event_schedule(2024, include_testing=False)
-        now = pd.Timestamp.now()
-        
-        # Find races that are in the future
-        future_races = schedule[schedule['EventDate'] > now]
-        
-        # If we are testing and all 2024 races are in the past, 
-        # we mock a future date so the UI timer actually works.
-        if future_races.empty:
-            # Grab the last race of the season just for the name
-            next_race = schedule.iloc[-1]
-            # Create a guaranteed future date (2 days, 14 hours, 30 mins from NOW)
-            future_date = datetime.now() + timedelta(days=2, hours=14, minutes=30)
-            
-            return {
-                "name": next_race['EventName'],
-                "circuit": next_race['Location'],
-                "target_date": future_date.isoformat()
-            }
-            
-        # If there is a real future race, use it
-        next_race = future_races.iloc[0]
-        return {
-            "name": next_race['EventName'],
-            "circuit": next_race['Location'],
-            "target_date": next_race['EventDate'].isoformat()
-        }
-    except Exception as e:
-        return {"error": str(e)}
+    now = pd.Timestamp.now(tz="UTC")
+
+    race_rows = CALENDAR[
+        session_is(CALENDAR["Session"], ["Race"])
+        & (CALENDAR["SessionDateUTC"] < now)
+    ].copy()
+
+    race_rows = race_rows.sort_values(
+        "SessionDateUTC",
+        ascending=False
+    ).head(3)
+
+    formatted_races = []
+
+    for _, race in race_rows.iterrows():
+
+        round_number = race.get("RoundNumber", None)
+
+        formatted_races.append({
+            "id": str(race["EventName"]),
+            "code": country_code(race["Country"]),
+            "name": race["EventName"],
+            "date": race["SessionDateUTC"].strftime("%d %b"),
+            "round": (
+                f"R{int(round_number)}"
+                if pd.notna(round_number)
+                else ""
+            ),
+            "session": "RACE"
+        })
+
+    return {
+        "races": formatted_races
+    }
+
+
+# ==========================================
+# DRIVERS
+# ==========================================
 
 @app.get("/api/drivers")
 def get_drivers():
-    """Returns the real 2024 F1 Driver Grid with full names and teams."""
+
     drivers = [
         {"code": "VER", "name": "Max Verstappen", "team": "Red Bull Racing"},
         {"code": "PER", "name": "Sergio Perez", "team": "Red Bull Racing"},
-        {"code": "HAM", "name": "Lewis Hamilton", "team": "Mercedes"},
-        {"code": "RUS", "name": "George Russell", "team": "Mercedes"},
+        {"code": "HAM", "name": "Lewis Hamilton", "team": "Ferrari"},
         {"code": "LEC", "name": "Charles Leclerc", "team": "Ferrari"},
-        {"code": "SAI", "name": "Carlos Sainz", "team": "Ferrari"},
         {"code": "NOR", "name": "Lando Norris", "team": "McLaren"},
         {"code": "PIA", "name": "Oscar Piastri", "team": "McLaren"},
+        {"code": "RUS", "name": "George Russell", "team": "Mercedes"},
+        {"code": "ANT", "name": "Andrea Kimi Antonelli", "team": "Mercedes"},
         {"code": "ALO", "name": "Fernando Alonso", "team": "Aston Martin"},
         {"code": "STR", "name": "Lance Stroll", "team": "Aston Martin"},
         {"code": "GAS", "name": "Pierre Gasly", "team": "Alpine"},
-        {"code": "OCO", "name": "Esteban Ocon", "team": "Alpine"},
+        {"code": "COL", "name": "Franco Colapinto", "team": "Alpine"},
         {"code": "ALB", "name": "Alex Albon", "team": "Williams"},
-        {"code": "COL", "name": "Franco Colapinto", "team": "Williams"},
-        {"code": "TSU", "name": "Yuki Tsunoda", "team": "RB"},
-        {"code": "LAW", "name": "Liam Lawson", "team": "RB"},
-        {"code": "BOT", "name": "Valtteri Bottas", "team": "Sauber"},
-        {"code": "ZHO", "name": "Zhou Guanyu", "team": "Sauber"},
-        {"code": "HUL", "name": "Nico Hulkenberg", "team": "Haas"},
-        {"code": "MAG", "name": "Kevin Magnussen", "team": "Haas"}
+        {"code": "SAI", "name": "Carlos Sainz", "team": "Williams"},
+        {"code": "HUL", "name": "Nico Hulkenberg", "team": "Kick Sauber"},
+        {"code": "BOR", "name": "Gabriel Bortoleto", "team": "Kick Sauber"},
+        {"code": "OCO", "name": "Esteban Ocon", "team": "Haas"},
+        {"code": "BEA", "name": "Oliver Bearman", "team": "Haas"},
+        {"code": "LAW", "name": "Liam Lawson", "team": "Racing Bulls"},
+        {"code": "HAD", "name": "Isack Hadjar", "team": "Racing Bulls"},
     ]
+
     return {"drivers": drivers}
