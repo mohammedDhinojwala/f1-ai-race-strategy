@@ -1,7 +1,7 @@
 
 from pathlib import Path
 from typing import List
-
+from fastapi import Query
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -290,3 +290,167 @@ def get_drivers():
     ]
 
     return {"drivers": drivers}
+
+
+# ==========================================
+# NEXT EVENT - LIVE PAGE
+# ==========================================
+
+@app.get("/api/live-event")
+def get_live_event():
+
+    now = pd.Timestamp.now(tz="UTC")
+
+    # Find sessions that have not started yet
+    upcoming = CALENDAR[
+        CALENDAR["SessionDateUTC"] > now
+    ].sort_values("SessionDateUTC")
+
+    if upcoming.empty:
+        return {
+            "available": False,
+            "message": "No upcoming event found."
+        }
+
+    # Identify the next event
+    next_session = upcoming.iloc[0]
+
+    event_rows = CALENDAR[
+        (CALENDAR["Year"] == next_session["Year"]) &
+        (CALENDAR["RoundNumber"] == next_session["RoundNumber"])
+    ].sort_values("SessionDateUTC")
+
+    sessions = []
+
+    for _, row in event_rows.iterrows():
+
+        session_name = str(row["Session"]).strip()
+
+        labels = {
+            "Practice 1": "FP1",
+            "Practice 2": "FP2",
+            "Practice 3": "FP3",
+            "Qualifying": "Quali",
+            "Race": "Race",
+            "Sprint": "Sprint",
+            "Sprint Qualifying": "Sprint Quali",
+            "Sprint Shootout": "Sprint Shootout",
+        }
+
+        session_time = row["SessionDateUTC"]
+
+        sessions.append({
+            "name": labels.get(session_name, session_name),
+            "session": session_name,
+            "target_date": session_time.isoformat(),
+            "status": (
+                "completed" if session_time <= now else "upcoming"
+            )
+        })
+
+    return {
+        "available": True,
+        "year": int(next_session["Year"]),
+        "round": int(next_session["RoundNumber"]),
+        "event": next_session["EventName"],
+        "country": next_session["Country"],
+        "circuit": next_session["Location"],
+        "sessions": sessions
+    }
+
+
+
+
+# ==========================================
+# REPLAY SEASONS
+# ==========================================
+
+def get_completed_races():
+
+    now = pd.Timestamp.now(tz="UTC")
+
+    races = CALENDAR[
+        (CALENDAR["Session"].str.casefold() == "race") &
+        (CALENDAR["SessionDateUTC"] < now)
+    ].copy()
+
+    return races.sort_values("SessionDateUTC")
+
+
+def get_country_code(country):
+
+    codes = {
+        "Australia": "AU",
+        "Japan": "JP",
+        "China": "CN",
+        "United States": "US",
+        "United Kingdom": "GB",
+        "Monaco": "MC",
+        "Spain": "ES",
+        "Canada": "CA",
+        "Austria": "AT",
+        "United Kingdom": "GB",
+        "Belgium": "BE",
+        "Hungary": "HU",
+        "Netherlands": "NL",
+        "Italy": "IT",
+        "Singapore": "SG",
+        "Azerbaijan": "AZ",
+        "Mexico": "MX",
+        "Brazil": "BR",
+        "Qatar": "QA",
+        "United Arab Emirates": "AE",
+        "Bahrain": "BH",
+        "Saudi Arabia": "SA",
+    }
+
+    return codes.get(str(country), str(country)[:2].upper())
+
+
+@app.get("/api/replay-seasons")
+def get_replay_seasons():
+
+    races = get_completed_races()
+
+    years = sorted(
+        races["Year"].dropna().astype(int).unique().tolist()
+    )
+
+    return {"seasons": years}
+
+
+# ==========================================
+# REPLAY RACES BY SEASON
+# ==========================================
+
+@app.get("/api/replay-races")
+def get_replay_races(year: int = Query(...)):
+
+    races = get_completed_races()
+
+    races = races[races["Year"] == year].copy()
+
+    formatted_races = []
+
+    for _, race in races.iterrows():
+
+        round_number = int(race["RoundNumber"])
+
+        formatted_races.append({
+            "id": f"{year}-{round_number}",
+            "year": year,
+            "code": get_country_code(race["Country"]),
+            "round": f"R{round_number}",
+            "round_number": round_number,
+            "name": race["EventName"],
+            "circuit": race["Location"],
+            "country": race["Country"],
+            "date": race["SessionDateUTC"].strftime("%d %b"),
+            "date_utc": race["SessionDateUTC"].isoformat()
+        })
+
+    return {
+        "year": year,
+        "total": len(formatted_races),
+        "races": formatted_races
+    }
