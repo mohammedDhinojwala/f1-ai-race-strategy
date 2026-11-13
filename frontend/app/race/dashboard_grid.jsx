@@ -26,7 +26,37 @@ const panelNames = {
   gap: "Gap Chart",
 };
 
-export default function DashboardGrid() {
+// changes made
+
+// export default function DashboardGrid() {
+//   const [layout, setLayout] = useState(initialLayout);
+//   const { width, containerRef, mounted } = useContainerWidth();
+
+//   return (
+//     <div ref={containerRef} className="w-full min-h-screen bg-black p-2">
+//       {mounted && (
+//         <ReactGridLayout
+//           width={width}
+//           layout={layout}
+//           onLayoutChange={setLayout}
+//           gridConfig={{ cols: 12, rowHeight: 40, margin: [8, 8] }}
+//           dragConfig={{ enabled: true, handle: ".drag-handle" }}
+//           resizeConfig={{ enabled: true }}
+//         >
+//           {layout.map((panel) => (
+//             <div key={panel.i} className="bg-[#111] border border-[#333] rounded overflow-hidden">
+//               <PanelWrapper title={panelNames[panel.i]}>
+//                 <div className="p-3 text-gray-500 text-xs">
+//                   {panelNames[panel.i]} content goes here
+//                 </div>
+//               </PanelWrapper>
+//             </div>
+//           ))}
+//         </ReactGridLayout>
+//       )}
+//     </div>
+//   );
+}export default function DashboardGrid() {
   const [layout, setLayout] = useState(initialLayout);
   const { width, containerRef, mounted } = useContainerWidth();
 
